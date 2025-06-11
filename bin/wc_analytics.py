@@ -17,12 +17,12 @@ import re
 from datetime import datetime, timedelta
 import argparse
 from pathlib import Path
-import nltk
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    nltk.download('punkt', quiet=True)
-from nltk.tokenize import sent_tokenize
+# Simple sentence splitting without nltk
+def sent_tokenize(text):
+    """Simple sentence tokenizer that counts periods, exclamations, and questions"""
+    # This is a basic implementation - good enough for metrics
+    sentences = re.split(r'[.!?]+', text)
+    return [s.strip() for s in sentences if s.strip()]
 
 def get_text_metrics(text):
     """Calculate metrics for a given text."""
@@ -110,7 +110,8 @@ def analyze_session(log_path):
         with open(filename, 'r') as f:
             final_content = f.read()
     except:
-        final_content = "File no longer accessible"
+        # If file is not accessible, skip this session
+        return None
 
     # Calculate metrics
     initial_metrics = get_text_metrics(initial_content)
