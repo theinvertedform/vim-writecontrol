@@ -3,6 +3,11 @@
 WriteControl Analytics Script
 Analyzes writing session data to provide insights about changes in wordcount,
 sentences, paragraphs, and overall editing activity.
+
+Usage:
+    wc_analytics.py [log_file] [--all] [--dir DIR]  # Original single-file analysis
+    wc_analytics.py analyze <log_file> [--all] [--dir DIR]  # Explicit analyze
+    wc_analytics.py process <log_files...>  # Generate commit message
 """
 
 import json
@@ -224,15 +229,132 @@ def print_session_report(session_data, accumulated_data=None):
         print(f"Words per minute: {accumulated_data['words_per_minute']}")
         print("-"*60)
 
+def generate_commit_message(file_sessions):
+    """Generate a descriptive commit message from session data"""
+
+    if not file_sessions:
+        return None
+
+    # Single file
+    if len(file_sessions) == 1:
+        filename, sessions = list(file_sessions.items())[0]
+        base_name = os.path.basename(filename)
+
+        # Aggregate stats
+        total_words = sum(s['changes']['words'] for s in sessions)
+        total_duration_ms = sum(s['session_duration_ms'] for s in sessions)
+
+        # Special handling for new files
+        if all(s['initial_metrics']['words'] == 0 for s in sessions):
+            return f"New file {base_name}: {sessions[-1]['final_metrics']['words']} words, {format_time(total_duration_ms)}"
+
+        # Format message based on changes
+        if total_words > 0:
+            msg = f"Edit {base_name}: +{total_words} words"
+        elif total_words < 0:
+            msg = f"Edit {base_name}: {total_words} words"
+        else:
+            # No word change, check for other changes
+            avg_change_pct = sum(s['change_percentage'] for s in sessions) / len(sessions)
+            if avg_change_pct > 30:
+                msg = f"Revise {base_name}: {int(avg_change_pct)}% changed"
+            else:
+                msg = f"Edit {base_name}"
+
+        # Add duration if significant
+        if total_duration_ms > 300000:  # 5 minutes
+            msg += f", {format_time(total_duration_ms)}"
+
+        return msg
+
+    # Multiple files
+    else:
+        file_count = len(file_sessions)
+        total_words = sum(sum(s['changes']['words'] for s in sessions)
+                         for sessions in file_sessions.values())
+        total_duration_ms = sum(sum(s['session_duration_ms'] for s in sessions)
+                               for sessions in file_sessions.values())
+
+        # Create file summary
+        file_summaries = []
+        for filename, sessions in file_sessions.items():
+            base_name = os.path.basename(filename)
+            words_change = sum(s['changes']['words'] for s in sessions)
+            if words_change != 0:
+                file_summaries.append(f"{base_name} ({words_change:+d}w)")
+
+        # Build message
+        if file_summaries and len(file_summaries) <= 3:
+            msg = f"Edit {', '.join(file_summaries)}"
+        else:
+            msg = f"Edit {file_count} files"
+            if total_words > 0:
+                msg += f": +{total_words} words"
+            elif total_words < 0:
+                msg += f": {total_words} words"
+
+        # Add total duration if significant
+        if total_duration_ms > 300000:  # 5 minutes
+            msg += f", {format_time(total_duration_ms)}"
+
+        return msg
+
+def process_logs_for_commit(log_files):
+    """Process multiple log files and generate a commit message"""
+
+    file_sessions = {}
+
+    for log_file in log_files:
+        try:
+            session = analyze_session(log_file)
+            filename = session['full_path']
+
+            if filename not in file_sessions:
+                file_sessions[filename] = []
+            file_sessions[filename].append(session)
+        except Exception as e:
+            # Skip files that can't be processed
+            continue
+
+    return generate_commit_message(file_sessions)
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze WriteControl session logs')
-    parser.add_argument('log_file', nargs='?', help='Path to the session log file')
-    parser.add_argument('--all', action='store_true', help='Analyze all sessions for this file')
-    parser.add_argument('--dir', help='Custom log directory path')
-    args = parser.parse_args()
 
+    # Check if first argument looks like a subcommand
+    if len(sys.argv) > 1 and sys.argv[1] in ['analyze', 'process']:
+        # Use subcommands
+        subparsers = parser.add_subparsers(dest='command', help='Commands')
+
+        # Analyze subcommand
+        analyze_parser = subparsers.add_parser('analyze', help='Analyze a single session')
+        analyze_parser.add_argument('log_file', help='Path to the session log file')
+        analyze_parser.add_argument('--all', action='store_true', help='Analyze all sessions for this file')
+        analyze_parser.add_argument('--dir', help='Custom log directory path')
+
+        # Process subcommand
+        process_parser = subparsers.add_parser('process', help='Process logs for commit message')
+        process_parser.add_argument('log_files', nargs='+', help='Log files to process')
+
+        args = parser.parse_args()
+    else:
+        # Backward compatibility - no subcommand
+        parser.add_argument('log_file', nargs='?', help='Path to the session log file')
+        parser.add_argument('--all', action='store_true', help='Analyze all sessions for this file')
+        parser.add_argument('--dir', help='Custom log directory path')
+        args = parser.parse_args()
+        args.command = None
+
+    # Handle process command
+    if args.command == 'process':
+        commit_msg = process_logs_for_commit(args.log_files)
+        if commit_msg:
+            print(f"Commit message: {commit_msg}")
+        return 0
+
+    # Handle analyze command or backward compatibility mode
     # Determine log directory
-    if args.dir:
+    if hasattr(args, 'dir') and args.dir:
         log_dir = args.dir
     else:
         xdg_state_home = os.getenv('XDG_STATE_HOME')
@@ -244,7 +366,7 @@ def main():
         print(f"Error: Log directory {log_dir} does not exist")
         return 1
 
-    if args.log_file:
+    if hasattr(args, 'log_file') and args.log_file:
         if not os.path.exists(args.log_file):
             print(f"Error: Log file {args.log_file} does not exist")
             return 1
